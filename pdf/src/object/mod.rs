@@ -553,6 +553,14 @@ impl<T> From<RcRef<T>> for Lazy<T> {
         }
     }
 }
+impl<T: Object> From<RcRef<T>> for Lazy<T> {
+    fn from(value: RcRef<T>) -> Self {
+        Lazy {
+            primitive: Primitive::Reference(value.inner),
+            _marker: PhantomData
+        }
+    }
+}
 
 impl<T> From<RcRef<T>> for Lazy<T> {
     fn from(value: RcRef<T>) -> Self {
