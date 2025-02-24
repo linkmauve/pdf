@@ -109,6 +109,9 @@ pub trait DeepClone: Sized + Sync + Send + 'static {
 pub trait Updater {
     fn create<T: ObjectWrite>(&mut self, obj: T) -> Result<RcRef<T>>;
     fn update<T: ObjectWrite>(&mut self, old: PlainRef, obj: T) -> Result<RcRef<T>>;
+    fn update_ref<T: ObjectWrite>(&mut self, old: &RcRef<T>, obj: T) -> Result<RcRef<T>> {
+        self.update(old.get_ref().inner, obj)
+    }
     fn promise<T: Object>(&mut self) -> PromisedRef<T>;
     fn fulfill<T: ObjectWrite>(&mut self, promise: PromisedRef<T>, obj: T) -> Result<RcRef<T>>;
 }
@@ -471,6 +474,12 @@ impl<T: Object + DataSize> Lazy<T> {
             }
         }).cloned()
     }
+    pub fn safe(value: T, update: &mut impl Updater) -> Result<Self>
+    where T: ObjectWrite
+    {
+        let primitive = value.to_primitive(update)?;
+        Ok(Lazy { primitive, _marker: PhantomData, cache: OnceCell::new() })
+    }
 }
 impl<T: Object> Object for Lazy<T> {
     fn from_primitive(p: Primitive, _: &impl Resolve) -> Result<Self> {
@@ -495,11 +504,11 @@ impl<T> Default for Lazy<T> {
         }
     }
 }
-impl<T: Object> From<RcRef<T>> for Lazy<T> {
+impl<T> From<RcRef<T>> for Lazy<T> {
     fn from(value: RcRef<T>) -> Self {
         Lazy {
             primitive: Primitive::Reference(value.inner),
-            cache: OnceCell::with_value(MaybeRef::Direct(value.data)),
+            cache: OnceCell::with_value(MaybeRef::Indirect(value)),
             _marker: PhantomData
         }
     }
