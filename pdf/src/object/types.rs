@@ -298,8 +298,6 @@ pub struct Rectangle {
     pub right: f32,
     pub top: f32,
 }
-#[deprecated]
-pub type Rect = Rectangle;
 
 impl Object for Rectangle {
     fn from_primitive(p: Primitive, r: &impl Resolve) -> Result<Self> {
