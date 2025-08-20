@@ -414,11 +414,12 @@ pub fn run_length_decode(data: &[u8]) -> Result<Vec<u8>> {
             let start = c + 1;
             let end = start + length as usize + 1;
             // copy _following_ length + 1 bytes literally
-            buf.extend_from_slice(&d[start..end]);
+            let source = d.get(start..end).ok_or(PdfError::RleError)?;
+            buf.extend_from_slice(source);
             c = end; // move cursor to next run
         } else if length >= 129 {
             let copy = 257 - length as usize; // copy 2 - 128 times
-            let b = d[c + 1]; // copied byte
+            let b = *d.get(c + 1).ok_or(PdfError::RleError)?; // copied byte
             buf.extend(std::iter::repeat(b).take(copy));
             c += 2; // move cursor to next run
         } else {
