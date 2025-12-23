@@ -85,7 +85,10 @@ fn run() -> Result<(), PdfError> {
             // need to update the whole page
             let mut new_page: Page = (*old_page).clone();
 
-            let lazy_annots = Lazy::from(old_file.create(annots).unwrap());
+            let lazy_annots = Lazy::safe(
+                MaybeRef::Indirect(old_file.create(annots).unwrap()),
+                &mut old_file
+            ).unwrap();
             new_page.annotations = lazy_annots;
             PageRc::update(new_page, &old_page, &mut old_file).unwrap();
         }

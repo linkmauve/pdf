@@ -294,7 +294,7 @@ impl Object for PdfStream {
     }
 }
 impl ObjectWrite for PdfStream {
-    fn to_primitive(&self, _update: &mut impl Updater) -> Result<Primitive> {
+    fn to_primitive(&self, update: &mut impl Updater) -> Result<Primitive> {
         match self.inner {
             StreamInner::InFile { id, .. } => Ok(Primitive::Reference(id)),
             StreamInner::Pending { .. } => Ok(self.clone().into()),
@@ -303,9 +303,7 @@ impl ObjectWrite for PdfStream {
 }
 impl PdfStream {
     pub fn serialize(&self, out: &mut impl io::Write) -> Result<()> {
-        self.info.serialize(out)?;
 
-        writeln!(out, "stream")?;
         match self.inner {
             StreamInner::InFile { id, .. } => {
                 Primitive::Reference(id).serialize(out)?;

@@ -42,6 +42,94 @@ mods!(
     structtree,
     xobject
 );
+/*
+use std::iter::once;
+use itertools::Either;
+// needs recursive types
+impl PagesNode {
+    pub fn pages<'a>(&'a self, resolve: &'a impl Resolve) -> impl Iterator<Item=Result<PageRc>> + 'a {
+        match self {
+            PagesNode::Tree(ref tree) => Either::Left(Box::new(tree.pages(resolve))),
+            PagesNode::Leaf(ref page) => Either::Right(once(Ok(PageRc(page.clone()))))
+        }
+    }
+}
+*/
+
+/// A `PagesNode::Leaf` wrapped in a `RcRef`
+/// 
+#[derive(Debug, Clone, DataSize)]
+pub struct PageRc(RcRef<PagesNode>);
+impl Deref for PageRc {
+    type Target = Page;
+    fn deref(&self) -> &Page {
+        match *self.0 {
+            PagesNode::Leaf(ref page) => page,
+            _ => unreachable!()
+        }
+    }
+}
+impl PageRc {
+    pub fn create(page: Page, update: &mut impl Updater) -> Result<PageRc> {
+        Ok(PageRc(update.create(PagesNode::Leaf(page))?))
+    }
+    pub fn update(page: Page, old_page: &PageRc, update: &mut impl Updater) -> Result<PageRc> {
+        update.update(old_page.get_plain_ref(), PagesNode::Leaf(page)).map(PageRc)
+    }
+    pub fn get_ref(&self) -> Ref<PagesNode> {
+        self.0.get_ref()
+    }
+    pub fn get_plain_ref(&self) -> PlainRef {
+        self.0.inner
+    }
+}
+impl Object for PageRc {
+    fn from_primitive(p: Primitive, resolve: &impl Resolve) -> Result<PageRc> {
+        let node = t!(RcRef::from_primitive(p, resolve));
+        match *node {
+            PagesNode::Tree(_) => Err(PdfError::WrongDictionaryType {expected: "Page".into(), found: "Pages".into()}),
+            PagesNode::Leaf(_) => Ok(PageRc(node))
+        }
+    }
+}
+impl ObjectWrite for PageRc {
+    fn to_primitive(&self, update: &mut impl Updater) -> Result<Primitive> {
+        self.0.to_primitive(update)
+    }
+}
+
+/// A `PagesNode::Tree` wrapped in a `RcRef`
+/// 
+#[derive(Debug, Clone, DataSize)]
+pub struct PagesRc(RcRef<PagesNode>);
+impl Deref for PagesRc {
+    type Target = PageTree;
+    fn deref(&self) -> &PageTree {
+        match *self.0 {
+            PagesNode::Tree(ref tree) => tree,
+            _ => unreachable!()
+        }
+    }
+}
+impl PagesRc {
+    pub fn create(tree: PageTree, update: &mut impl Updater) -> Result<PagesRc> {
+        Ok(PagesRc(update.create(PagesNode::Tree(tree))?))
+    }
+}
+impl Object for PagesRc {
+    fn from_primitive(p: Primitive, resolve: &impl Resolve) -> Result<PagesRc> {
+        let node = t!(RcRef::from_primitive(p, resolve));
+        match *node {
+            PagesNode::Leaf(_) => Err(PdfError::WrongDictionaryType {expected: "Pages".into(), found: "Page".into()}),
+            PagesNode::Tree(_) => Ok(PagesRc(node))
+        }
+    }
+}
+impl ObjectWrite for PagesRc {
+    fn to_primitive(&self, update: &mut impl Updater) -> Result<Primitive> {
+        self.0.to_primitive(update)
+    }
+}
 
 #[derive(Object, ObjectWrite, Debug, DataSize)]
 #[pdf(Type = "Catalog?")]
@@ -80,17 +168,214 @@ pub struct Catalog {
 
     #[pdf(key = "StructTreeRoot")]
     pub struct_tree_root: Option<StructTreeRoot>,
-    // MarkInfo: dict
-    // Lang: text string
-    // SpiderInfo: dict
-    // OutputIntents: array
-    // PieceInfo: dict
-    // OCProperties: dict
-    // Perms: dict
-    // Legal: dict
-    // Requirements: array
-    // Collection: dict
-    // NeedsRendering: bool
+
+// MarkInfo: dict
+// Lang: text string
+// SpiderInfo: dict
+// OutputIntents: array
+// PieceInfo: dict
+// OCProperties: dict
+// Perms: dict
+// Legal: dict
+// Requirements: array
+// Collection: dict
+// NeedsRendering: bool
+}
+
+#[derive(Object, ObjectWrite, Debug, Default, Clone, DataSize)]
+#[pdf(Type = "Pages?")]
+pub struct PageTree {
+    #[pdf(key="Parent")]
+    pub parent: Option<PagesRc>,
+
+    #[pdf(key="Kids")]
+    pub kids:   Vec<Ref<PagesNode>>,
+
+    #[pdf(key="Count")]
+    pub count:  u32,
+
+    #[pdf(key="Resources")]
+    pub resources: Option<MaybeRef<Resources>>,
+    
+    #[pdf(key="MediaBox")]
+    pub media_box:  Option<Rectangle>,
+    
+    #[pdf(key="CropBox")]
+    pub crop_box:   Option<Rectangle>,
+}
+impl PageTree {
+    pub fn page(&self, resolve: &impl Resolve, page_nr: u32) -> Result<PageRc> {
+        self.page_limited(resolve, page_nr, 16)
+    }
+    fn page_limited(&self, resolve: &impl Resolve, page_nr: u32, depth: usize) -> Result<PageRc> {
+        if depth == 0 {
+            bail!("page tree depth exeeded");
+        }
+        let mut pos = 0;
+        for &kid in &self.kids {
+            let node = resolve.get(kid)?;
+            match *node {
+                PagesNode::Tree(ref tree) => {
+                    if (pos .. pos + tree.count).contains(&page_nr) {
+                        return tree.page_limited(resolve, page_nr - pos, depth - 1);
+                    }
+                    pos += tree.count;
+                }
+                PagesNode::Leaf(ref _page) => {
+                    if pos == page_nr {
+                        return Ok(PageRc(node));
+                    }
+                    pos += 1;
+                }
+            }
+        }
+        Err(PdfError::PageOutOfBounds {page_nr, max: pos})
+    }
+
+    /*
+    pub fn update_pages(&mut self, mut offset: u32, page_nr: u32, page: Page) -> Result<()> {
+        for kid in &self.kids {
+            // println!("{}/{} {:?}", offset, page_nr, kid);
+            match *(self.get(*kid)?) {
+                PagesNode::Tree(ref mut t) => {
+                    if offset + t.count < page_nr {
+                        offset += t.count;
+                    } else {
+                        return self.update_pages(t, offset, page_nr, page);
+                    }
+                },
+                PagesNode::Leaf(ref mut p) => {
+                    if offset < page_nr {
+                        offset += 1;
+                    } else {
+                        assert_eq!(offset, page_nr);
+                        let p = self.storage.create(page)?;
+                        self.storage.update(kid.get_inner(), PagesNode::Leaf(p));
+                        return Ok(());
+                    }
+                }
+            }
+            
+        }
+        Err(PdfError::PageNotFound {page_nr: page_nr})
+    }
+    pub fn pages<'a>(&'a self, resolve: &'a impl Resolve) -> impl Iterator<Item=Result<PageRc>> + 'a {
+        self.kids.iter().flat_map(move |&r| {
+            match resolve.get(r) {
+                Ok(node) => Either::Left(node.pages(resolve)),
+                Err(e) => Either::Right(once(Err(e)))
+            }
+        })
+    }
+    */
+}
+impl SubType<PagesNode> for PageTree {}
+
+#[derive(Object, ObjectWrite, Debug, Clone, DataSize)]
+#[pdf(Type="Page?")]
+pub struct Page {
+    #[pdf(key="Parent")]
+    pub parent: PagesRc,
+
+    #[pdf(key="Resources", indirect)]
+    pub resources: Option<MaybeRef<Resources>>,
+    
+    #[pdf(key="MediaBox")]
+    pub media_box:  Option<Rectangle>,
+    
+    #[pdf(key="CropBox")]
+    pub crop_box:   Option<Rectangle>,
+    
+    #[pdf(key="TrimBox")]
+    pub trim_box:   Option<Rectangle>,
+    
+    #[pdf(key="Contents")]
+    pub contents:   Option<Content>,
+
+    #[pdf(key="Rotate", default="0")]
+    pub rotate: i32,
+
+    #[pdf(key="Metadata")]
+    pub metadata:   Option<Primitive>,
+
+    #[pdf(key="LGIDict")]
+    pub lgi:        Option<Primitive>,
+
+    #[pdf(key="VP")]
+    pub vp:         Option<Primitive>,
+
+    #[pdf(key="Annots")]
+    pub annotations: Lazy<MaybeRef<Vec<MaybeRef<Annot>>>>,
+
+    #[pdf(other)]
+    pub other: Dictionary,
+}
+fn inherit<'a, T: 'a, F>(mut parent: &'a PageTree, f: F) -> Result<Option<T>>
+    where F: Fn(&'a PageTree) -> Option<T>
+{
+    loop {
+        match (&parent.parent, f(parent)) {
+            (_, Some(t)) => return Ok(Some(t)),
+            (Some(ref p), None) => parent = p,
+            (None, None) => return Ok(None)
+        }
+    }
+}
+
+impl Page {
+    pub fn new(parent: PagesRc) -> Page {
+        Page {
+            parent,
+            media_box:  None,
+            crop_box:   None,
+            trim_box:   None,
+            resources:  None,
+            contents:   None,
+            rotate:     0,
+            metadata:   None,
+            lgi:        None,
+            vp:         None,
+            other: Dictionary::new(),
+            annotations: Default::default(),
+        }
+    }
+    pub fn media_box(&self) -> Result<Rectangle> {
+        match self.media_box {
+            Some(b) => Ok(b),
+            None => inherit(&self.parent, |pt| pt.media_box)?
+                .ok_or_else(|| PdfError::MissingEntry { typ: "Page", field: "MediaBox".into() })
+        }
+    }
+    pub fn crop_box(&self) -> Result<Rectangle> {
+        match self.crop_box {
+            Some(b) => Ok(b),
+            None => match inherit(&self.parent, |pt| pt.crop_box)? {
+                Some(b) => Ok(b),
+                None => self.media_box()
+            }
+        }
+    }
+    pub fn resources(&self) -> Result<&MaybeRef<Resources>> {
+        match self.resources {
+            Some(ref r) => Ok(r),
+            None => inherit(&self.parent, |pt| pt.resources.as_ref())?
+                .ok_or_else(|| PdfError::MissingEntry { typ: "Page", field: "Resources".into() })
+        }
+    }
+}
+impl SubType<PagesNode> for Page {}
+
+
+#[derive(Object, DataSize, Debug, ObjectWrite)]
+pub struct PageLabel {
+    #[pdf(key="S")]
+    pub style:  Option<Counter>,
+    
+    #[pdf(key="P")]
+    pub prefix: Option<PdfString>,
+    
+    #[pdf(key="St")]
+    pub start:  Option<usize>
 }
 
 #[derive(Object, ObjectWrite, Debug, DataSize, Default, DeepClone, Clone)]
@@ -139,6 +424,522 @@ impl RenderingIntent {
             RenderingIntent::Perceptual => "Perceptual",
             RenderingIntent::Saturation => "Saturation",
         }
+    }
+}
+
+#[derive(Object, Debug, DataSize, DeepClone, ObjectWrite, Clone, Default)]
+#[pdf(Type="XObject?", Subtype="Form")]
+pub struct FormDict {
+    #[pdf(key="FormType", default="1")]
+    pub form_type: i32,
+
+    #[pdf(key="Name")]
+    pub name: Option<Name>,
+
+    #[pdf(key="LastModified")]
+    pub last_modified: Option<PdfString>,
+
+    #[pdf(key="BBox")]
+    pub bbox: Rectangle,
+
+    #[pdf(key="Matrix")]
+    pub matrix: Option<Primitive>,
+
+    #[pdf(key="Resources")]
+    pub resources: Option<MaybeRef<Resources>>,
+
+    #[pdf(key="Group")]
+    pub group: Option<Dictionary>,
+
+    #[pdf(key="Ref")]
+    pub reference: Option<Dictionary>,
+
+    #[pdf(key="Metadata")]
+    pub metadata: Option<Ref<Stream<()>>>,
+
+    #[pdf(key="PieceInfo")]
+    pub piece_info: Option<Dictionary>,
+
+    #[pdf(key="StructParent")]
+    pub struct_parent: Option<i32>,
+
+    #[pdf(key="StructParents")]
+    pub struct_parents: Option<i32>,
+
+    #[pdf(key="OPI")]
+    pub opi: Option<Dictionary>,
+
+    #[pdf(other)]
+    pub other: Dictionary,
+}
+
+
+#[derive(Object, ObjectWrite, Debug, Clone, DataSize)]
+pub struct InteractiveFormDictionary {
+    #[pdf(key="Fields")]
+    pub fields: Vec<RcRef<FieldDictionary>>,
+    
+    #[pdf(key="NeedAppearances", default="false")]
+    pub need_appearences: bool,
+    
+    #[pdf(key="SigFlags", default="0")]
+    pub sig_flags: u32,
+    
+    #[pdf(key="CO")]
+    pub co: Option<Vec<RcRef<FieldDictionary>>>,
+    
+    #[pdf(key="DR")]
+    pub dr: Option<MaybeRef<Resources>>,
+    
+    #[pdf(key="DA")]
+    pub da: Option<PdfString>,
+    
+    #[pdf(key="Q")]
+    pub q: Option<i32>,
+
+    #[pdf(key="XFA")]
+    pub xfa: Option<Primitive>,
+}
+
+#[derive(Object, ObjectWrite, Debug, Copy, Clone, PartialEq, DataSize)]
+pub enum FieldType {
+    #[pdf(name="Btn")]
+    Button,
+    #[pdf(name="Tx")]
+    Text,
+    #[pdf(name="Ch")]
+    Choice,
+    #[pdf(name="Sig")]
+    Signature,
+    #[pdf(name="SigRef")]
+    SignatureReference,
+}
+
+#[derive(Object, ObjectWrite, Debug)]
+#[pdf(Type="SV")]
+pub struct SeedValueDictionary {
+    #[pdf(key="Ff", default="0")]
+    pub flags: u32,
+    #[pdf(key="Filter")]
+    pub filter: Option<Name>,
+    #[pdf(key="SubFilter")]
+    pub sub_filter:  Option<Vec<Name>>,
+    #[pdf(key="V")]
+    pub value: Option<Primitive>,
+    #[pdf(key="DigestMethod")]
+    pub digest_method: Vec<PdfString>,
+    #[pdf(other)]
+    pub other: Dictionary
+}
+
+#[derive(Object, ObjectWrite, Debug)]
+#[pdf(Type="Sig?")]
+pub struct SignatureDictionary {
+    #[pdf(key="Filter")]
+    pub filter: Name,
+    #[pdf(key="SubFilter")]
+    pub sub_filter: Name,
+    #[pdf(key="ByteRange")]
+    pub byte_range: Vec<usize>,
+    #[pdf(key="Contents")]
+    pub contents: PdfString,
+    #[pdf(key="Cert")]
+    pub cert: Vec<PdfString>,
+    #[pdf(key="Reference")]
+    pub reference: Option<Primitive>,
+    #[pdf(key="Name")]
+    pub name: Option<PdfString>,
+    #[pdf(key="M")]
+    pub m: Option<PdfString>,
+    #[pdf(key="Location")]
+    pub location: Option<PdfString>,
+    #[pdf(key="Reason")]
+    pub reason: Option<PdfString>,
+    #[pdf(key="ContactInfo")]
+    pub contact_info: Option<PdfString>,
+    #[pdf(key="V")]
+    pub v: i32,
+    #[pdf(key="R")]
+    pub r: i32,
+    #[pdf(key="Prop_Build")]
+    pub prop_build: Dictionary,
+    #[pdf(key="Prop_AuthTime")]
+    pub prop_auth_time: i32,
+    #[pdf(key="Prop_AuthType")]
+    pub prop_auth_type: Name,
+    #[pdf(other)]
+    pub other: Dictionary
+}
+
+#[derive(Object, ObjectWrite, Debug)]
+#[pdf(Type="SigRef?")]
+pub struct SignatureReferenceDictionary {
+    #[pdf(key="TransformMethod")]
+    pub transform_method: Name,
+    #[pdf(key="TransformParams")]
+    pub transform_params: Option<Dictionary>,
+    #[pdf(key="Data")]
+    pub data: Option<Primitive>,
+    #[pdf(key="DigestMethod")]
+    pub digest_method: Option<Name>,
+    #[pdf(other)]
+    pub other: Dictionary
+}
+
+
+#[derive(Object, ObjectWrite, Debug, Clone, DataSize)]
+#[pdf(Type="Annot?")]
+pub struct Annot {
+    #[pdf(key="Subtype")]
+    pub subtype: Name,
+    
+    #[pdf(key="Rect")]
+    pub rect: Option<Rectangle>,
+
+    #[pdf(key="Contents")]
+    pub contents: Option<PdfString>,
+
+    #[pdf(key="P")]
+    pub page: Option<PageRc>,
+
+    #[pdf(key="NM")]
+    pub annotation_name: Option<PdfString>,
+
+    #[pdf(key="M")]
+    pub date: Option<Date>,
+
+    #[pdf(key="F", default="0")]
+    pub annot_flags: u32,
+
+    #[pdf(key="AP")]
+    pub appearance_streams: Option<MaybeRef<AppearanceStreams>>,
+
+    #[pdf(key="AS")]
+    pub appearance_state: Option<Name>,
+
+    #[pdf(key="Border")]
+    pub border: Option<Primitive>,
+
+    #[pdf(key="C")]
+    pub color: Option<Primitive>,
+
+    #[pdf(key="InkList")]
+    pub ink_list: Option<Primitive>,
+
+    #[pdf(key="L")]
+    pub line: Option<Primitive>,
+
+    #[pdf(other)]
+    pub other: Dictionary,
+}
+
+#[derive(Object, ObjectWrite, Debug, DataSize, Clone)]
+pub struct FieldDictionary {
+    #[pdf(key="FT")]
+    pub typ: Option<FieldType>,
+    
+    #[pdf(key="Parent")]
+    pub parent: Option<Ref<FieldDictionary>>,
+    
+    #[pdf(key="Kids")]
+    pub kids: Vec<Ref<FieldDictionary>>,
+    
+    #[pdf(key="T")]
+    pub name: Option<PdfString>,
+    
+    #[pdf(key="TU")]
+    pub alt_name: Option<PdfString>,
+    
+    #[pdf(key="TM")]
+    pub mapping_name: Option<PdfString>,
+    
+    #[pdf(key="Ff", default="0")]
+    pub flags: u32,
+
+    #[pdf(key="SigFlags", default="0")]
+    pub sig_flags: u32,
+
+    #[pdf(key="V")]
+    pub value: Primitive,
+    
+    #[pdf(key="DV")]
+    pub default_value: Primitive,
+    
+    #[pdf(key="DR")]
+    pub default_resources: Option<MaybeRef<Resources>>,
+    
+    #[pdf(key="AA")]
+    pub actions: Option<Dictionary>,
+
+    #[pdf(key="Rect")]
+    pub rect: Option<Rectangle>,
+
+    #[pdf(key="MaxLen")]
+    pub max_len: Option<u32>,
+
+    #[pdf(key="Subtype")]
+    pub subtype: Option<Name>,
+
+    #[pdf(other)]
+    pub other: Dictionary
+}
+
+#[derive(Object, ObjectWrite, Debug, DataSize, Clone, DeepClone)]
+pub struct AppearanceStreams {
+    #[pdf(key="N")]
+    pub normal: Ref<AppearanceStreamEntry>,
+
+    #[pdf(key="R")]
+    pub rollover: Option<Ref<AppearanceStreamEntry>>,
+
+    #[pdf(key="D")]
+    pub down: Option<Ref<AppearanceStreamEntry>>,
+}
+
+#[derive(Clone, Debug, DeepClone)]
+pub enum AppearanceStreamEntry {
+    Single(FormXObject),
+    Dict(HashMap<Name, AppearanceStreamEntry>)
+}
+impl Object for AppearanceStreamEntry {
+    fn from_primitive(p: Primitive, resolve: &impl Resolve) -> Result<Self> {
+        match p.resolve(resolve)? {
+            p @ Primitive::Dictionary(_) => Object::from_primitive(p, resolve).map(AppearanceStreamEntry::Dict),
+            p @ Primitive::Stream(_) => Object::from_primitive(p, resolve).map(AppearanceStreamEntry::Single),
+            p => Err(PdfError::UnexpectedPrimitive {expected: "Dict or Stream", found: p.get_debug_name()})
+        }
+    }
+}
+impl ObjectWrite for AppearanceStreamEntry {
+    fn to_primitive(&self, update: &mut impl Updater) -> Result<Primitive> {
+        match self {
+            AppearanceStreamEntry::Dict(d) => d.to_primitive(update),
+            AppearanceStreamEntry::Single(s) => s.to_primitive(update),
+        }
+    }
+}
+impl DataSize for AppearanceStreamEntry {
+    const IS_DYNAMIC: bool = true;
+    const STATIC_HEAP_SIZE: usize = std::mem::size_of::<Self>();
+    fn estimate_heap_size(&self) -> usize {
+        match self {
+            AppearanceStreamEntry::Dict(d) => d.estimate_heap_size(),
+            AppearanceStreamEntry::Single(s) => s.estimate_heap_size()
+        }
+    }
+}
+
+#[derive(Debug, DataSize, Clone, Object, ObjectWrite, DeepClone)]
+pub enum Counter {
+    #[pdf(name="D")]
+    Arabic,
+    #[pdf(name="r")]
+    RomanUpper,
+    #[pdf(name="R")]
+    RomanLower,
+    #[pdf(name="a")]
+    AlphaUpper,
+    #[pdf(name="A")]
+    AlphaLower
+}
+
+#[derive(Debug, DataSize)]
+pub enum NameTreeNode<T> {
+    ///
+    Intermediate (Vec<Ref<NameTree<T>>>),
+    ///
+    Leaf (Vec<(PdfString, T)>)
+
+}
+/// Note: The PDF concept of 'root' node is an intermediate or leaf node which has no 'Limits'
+/// entry. Hence, `limits`, 
+#[derive(Debug, DataSize)]
+pub struct NameTree<T> {
+    pub limits: Option<(PdfString, PdfString)>,
+    pub node: NameTreeNode<T>,
+}
+impl<T: Object+DataSize> NameTree<T> {
+    pub fn walk(&self, r: &impl Resolve, callback: &mut dyn FnMut(&PdfString, &T)) -> Result<(), PdfError> {
+        match self.node {
+            NameTreeNode::Leaf(ref items) => {
+                for (name, val) in items {
+                    callback(name, val);
+                }
+            }
+            NameTreeNode::Intermediate(ref items) => {
+                for &tree_ref in items {
+                    let tree = r.get(tree_ref)?;
+                    tree.walk(r, callback)?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+impl<T: Object> Object for NameTree<T> {
+    fn from_primitive(p: Primitive, resolve: &impl Resolve) -> Result<Self> {
+        let mut dict = t!(p.resolve(resolve)?.into_dictionary());
+        
+        let limits = match dict.remove("Limits") {
+            Some(limits) => {
+                let limits = limits.resolve(resolve)?.into_array()?;
+                if limits.len() != 2 {
+                    bail!("Error reading NameTree: 'Limits' is not of length 2");
+                }
+                let min = limits[0].clone().into_string()?;
+                let max = limits[1].clone().into_string()?;
+
+                Some((min, max))
+            }
+            None => None
+        };
+
+        let kids = dict.remove("Kids");
+        let names = dict.remove("Names");
+        // If no `kids`, try `names`. Else there is an error.
+        Ok(match (kids, names) {
+            (Some(kids), _) => {
+                let kids = t!(kids.resolve(resolve)?.into_array()?.iter().map(|kid|
+                    Ref::<NameTree<T>>::from_primitive(kid.clone(), resolve)
+                ).collect::<Result<Vec<_>>>());
+                NameTree {
+                    limits,
+                    node: NameTreeNode::Intermediate (kids)
+                }
+            }
+            (None, Some(names)) => {
+                let names = names.resolve(resolve)?.into_array()?;
+                let mut new_names = Vec::new();
+                for pair in names.chunks_exact(2) {
+                    let name = pair[0].clone().resolve(resolve)?.into_string()?;
+                    let value = t!(T::from_primitive(pair[1].clone(), resolve));
+                    new_names.push((name, value));
+                }
+                NameTree {
+                    limits,
+                    node: NameTreeNode::Leaf (new_names),
+                }
+            }
+            (None, None) => {
+                warn!("Neither Kids nor Names present in NameTree node.");
+                NameTree {
+                    limits,
+                    node: NameTreeNode::Intermediate(vec![])
+                }
+            }
+        })
+    }
+}
+
+impl<T: ObjectWrite> ObjectWrite for NameTree<T> {
+    fn to_primitive(&self, _update: &mut impl Updater) -> Result<Primitive> {
+        todo!("impl ObjectWrite for NameTree")
+    }
+}
+
+#[derive(DataSize, Debug)]
+pub struct NumberTree<T> {
+    pub limits: Option<(i32, i32)>,
+    pub node: NumberTreeNode<T>,
+}
+
+#[derive(DataSize, Debug)]
+pub enum NumberTreeNode<T> {
+    Leaf(Vec<(i32, T)>),
+    Intermediate(Vec<Ref<NumberTree<T>>>),
+}
+impl<T: Object> Object for NumberTree<T> {
+    fn from_primitive(p: Primitive, resolve: &impl Resolve) -> Result<Self> {
+        let mut dict = p.resolve(resolve)?.into_dictionary()?;
+
+        let limits = match dict.remove("Limits") {
+            Some(limits) => {
+                let limits = t!(limits.resolve(resolve)?.into_array());
+                if limits.len() != 2 {
+                    bail!("Error reading NameTree: 'Limits' is not of length 2");
+                }
+                let min = t!(limits[0].as_integer());
+                let max = t!(limits[1].as_integer());
+
+                Some((min, max))
+            }
+            None => None
+        };
+
+        let kids = dict.remove("Kids");
+        let nums = dict.remove("Nums");
+        match (kids, nums) {
+            (Some(kids), _) => {
+                let kids = t!(kids.resolve(resolve)?.into_array()?.iter().map(|kid|
+                    Ref::<NumberTree<T>>::from_primitive(kid.clone(), resolve)
+                ).collect::<Result<Vec<_>>>());
+                Ok(NumberTree {
+                    limits,
+                    node: NumberTreeNode::Intermediate (kids)
+                })
+            }
+            (None, Some(nums)) => {
+                let list = nums.into_array()?;
+                let mut items = Vec::with_capacity(list.len() / 2);
+                for (key, item) in list.into_iter().tuples() {
+                    let idx = t!(key.as_integer());
+                    let val = t!(T::from_primitive(item, resolve));
+                    items.push((idx, val));
+                }
+                Ok(NumberTree {
+                    limits,
+                    node: NumberTreeNode::Leaf(items)
+                })
+            }
+            (None, None) => {
+                warn!("Neither Kids nor Names present in NumberTree node.");
+                Ok(NumberTree {
+                    limits,
+                    node: NumberTreeNode::Intermediate(vec![])
+                })
+            }
+        }
+    }
+}
+impl<T: ObjectWrite> ObjectWrite for NumberTree<T> {
+    fn to_primitive(&self, update: &mut impl Updater) -> Result<Primitive> {
+        let mut dict = Dictionary::new();
+        if let Some(limits) = self.limits {
+            dict.insert("Limits", vec![limits.0.into(), limits.1.into()]);
+        }
+        match self.node {
+            NumberTreeNode::Leaf(ref items) => {
+                let mut nums = Vec::with_capacity(items.len() * 2);
+                for &(idx, ref label) in items {
+                    nums.push(idx.into());
+                    nums.push(label.to_primitive(update)?);
+                }
+                dict.insert("Nums", nums);
+            }
+            NumberTreeNode::Intermediate(ref kids) => {
+                dict.insert("Kids", kids.iter().map(|r| r.get_inner().into()).collect_vec());
+            }
+        }
+        Ok(dict.into())
+    }
+}
+impl<T: Object+DataSize> NumberTree<T> {
+    pub fn walk(&self, r: &impl Resolve, callback: &mut dyn FnMut(i32, &T)) -> Result<(), PdfError> {
+        match self.node {
+            NumberTreeNode::Leaf(ref items) => {
+                for &(idx, ref val) in items {
+                    callback(idx, val);
+                }
+            }
+            NumberTreeNode::Intermediate(ref items) => {
+                for &tree_ref in items {
+                    let tree = r.get(tree_ref)?;
+                    tree.walk(r, callback)?;
+                }
+            }
+        }
+        Ok(())
     }
 }
 
