@@ -57,7 +57,7 @@ impl PagesNode {
 */
 
 /// A `PagesNode::Leaf` wrapped in a `RcRef`
-/// 
+///
 #[derive(Debug, Clone, DataSize)]
 pub struct PageRc(RcRef<PagesNode>);
 impl Deref for PageRc {
@@ -93,39 +93,6 @@ impl Object for PageRc {
     }
 }
 impl ObjectWrite for PageRc {
-    fn to_primitive(&self, update: &mut impl Updater) -> Result<Primitive> {
-        self.0.to_primitive(update)
-    }
-}
-
-/// A `PagesNode::Tree` wrapped in a `RcRef`
-/// 
-#[derive(Debug, Clone, DataSize)]
-pub struct PagesRc(RcRef<PagesNode>);
-impl Deref for PagesRc {
-    type Target = PageTree;
-    fn deref(&self) -> &PageTree {
-        match *self.0 {
-            PagesNode::Tree(ref tree) => tree,
-            _ => unreachable!()
-        }
-    }
-}
-impl PagesRc {
-    pub fn create(tree: PageTree, update: &mut impl Updater) -> Result<PagesRc> {
-        Ok(PagesRc(update.create(PagesNode::Tree(tree))?))
-    }
-}
-impl Object for PagesRc {
-    fn from_primitive(p: Primitive, resolve: &impl Resolve) -> Result<PagesRc> {
-        let node = t!(RcRef::from_primitive(p, resolve));
-        match *node {
-            PagesNode::Leaf(_) => Err(PdfError::WrongDictionaryType {expected: "Pages".into(), found: "Page".into()}),
-            PagesNode::Tree(_) => Ok(PagesRc(node))
-        }
-    }
-}
-impl ObjectWrite for PagesRc {
     fn to_primitive(&self, update: &mut impl Updater) -> Result<Primitive> {
         self.0.to_primitive(update)
     }
@@ -182,201 +149,6 @@ pub struct Catalog {
 // NeedsRendering: bool
 }
 
-#[derive(Object, ObjectWrite, Debug, Default, Clone, DataSize)]
-#[pdf(Type = "Pages?")]
-pub struct PageTree {
-    #[pdf(key="Parent")]
-    pub parent: Option<PagesRc>,
-
-    #[pdf(key="Kids")]
-    pub kids:   Vec<Ref<PagesNode>>,
-
-    #[pdf(key="Count")]
-    pub count:  u32,
-
-    #[pdf(key="Resources")]
-    pub resources: Option<MaybeRef<Resources>>,
-    
-    #[pdf(key="MediaBox")]
-    pub media_box:  Option<Rectangle>,
-    
-    #[pdf(key="CropBox")]
-    pub crop_box:   Option<Rectangle>,
-}
-impl PageTree {
-    pub fn page(&self, resolve: &impl Resolve, page_nr: u32) -> Result<PageRc> {
-        self.page_limited(resolve, page_nr, 16)
-    }
-    fn page_limited(&self, resolve: &impl Resolve, page_nr: u32, depth: usize) -> Result<PageRc> {
-        if depth == 0 {
-            bail!("page tree depth exeeded");
-        }
-        let mut pos = 0;
-        for &kid in &self.kids {
-            let node = resolve.get(kid)?;
-            match *node {
-                PagesNode::Tree(ref tree) => {
-                    if (pos .. pos + tree.count).contains(&page_nr) {
-                        return tree.page_limited(resolve, page_nr - pos, depth - 1);
-                    }
-                    pos += tree.count;
-                }
-                PagesNode::Leaf(ref _page) => {
-                    if pos == page_nr {
-                        return Ok(PageRc(node));
-                    }
-                    pos += 1;
-                }
-            }
-        }
-        Err(PdfError::PageOutOfBounds {page_nr, max: pos})
-    }
-
-    /*
-    pub fn update_pages(&mut self, mut offset: u32, page_nr: u32, page: Page) -> Result<()> {
-        for kid in &self.kids {
-            // println!("{}/{} {:?}", offset, page_nr, kid);
-            match *(self.get(*kid)?) {
-                PagesNode::Tree(ref mut t) => {
-                    if offset + t.count < page_nr {
-                        offset += t.count;
-                    } else {
-                        return self.update_pages(t, offset, page_nr, page);
-                    }
-                },
-                PagesNode::Leaf(ref mut p) => {
-                    if offset < page_nr {
-                        offset += 1;
-                    } else {
-                        assert_eq!(offset, page_nr);
-                        let p = self.storage.create(page)?;
-                        self.storage.update(kid.get_inner(), PagesNode::Leaf(p));
-                        return Ok(());
-                    }
-                }
-            }
-            
-        }
-        Err(PdfError::PageNotFound {page_nr: page_nr})
-    }
-    pub fn pages<'a>(&'a self, resolve: &'a impl Resolve) -> impl Iterator<Item=Result<PageRc>> + 'a {
-        self.kids.iter().flat_map(move |&r| {
-            match resolve.get(r) {
-                Ok(node) => Either::Left(node.pages(resolve)),
-                Err(e) => Either::Right(once(Err(e)))
-            }
-        })
-    }
-    */
-}
-impl SubType<PagesNode> for PageTree {}
-
-#[derive(Object, ObjectWrite, Debug, Clone, DataSize)]
-#[pdf(Type="Page?")]
-pub struct Page {
-    #[pdf(key="Parent")]
-    pub parent: PagesRc,
-
-    #[pdf(key="Resources", indirect)]
-    pub resources: Option<MaybeRef<Resources>>,
-    
-    #[pdf(key="MediaBox")]
-    pub media_box:  Option<Rectangle>,
-    
-    #[pdf(key="CropBox")]
-    pub crop_box:   Option<Rectangle>,
-    
-    #[pdf(key="TrimBox")]
-    pub trim_box:   Option<Rectangle>,
-    
-    #[pdf(key="Contents")]
-    pub contents:   Option<Content>,
-
-    #[pdf(key="Rotate", default="0")]
-    pub rotate: i32,
-
-    #[pdf(key="Metadata")]
-    pub metadata:   Option<Primitive>,
-
-    #[pdf(key="LGIDict")]
-    pub lgi:        Option<Primitive>,
-
-    #[pdf(key="VP")]
-    pub vp:         Option<Primitive>,
-
-    #[pdf(key="Annots")]
-    pub annotations: Lazy<MaybeRef<Vec<MaybeRef<Annot>>>>,
-
-    #[pdf(other)]
-    pub other: Dictionary,
-}
-fn inherit<'a, T: 'a, F>(mut parent: &'a PageTree, f: F) -> Result<Option<T>>
-    where F: Fn(&'a PageTree) -> Option<T>
-{
-    loop {
-        match (&parent.parent, f(parent)) {
-            (_, Some(t)) => return Ok(Some(t)),
-            (Some(ref p), None) => parent = p,
-            (None, None) => return Ok(None)
-        }
-    }
-}
-
-impl Page {
-    pub fn new(parent: PagesRc) -> Page {
-        Page {
-            parent,
-            media_box:  None,
-            crop_box:   None,
-            trim_box:   None,
-            resources:  None,
-            contents:   None,
-            rotate:     0,
-            metadata:   None,
-            lgi:        None,
-            vp:         None,
-            other: Dictionary::new(),
-            annotations: Default::default(),
-        }
-    }
-    pub fn media_box(&self) -> Result<Rectangle> {
-        match self.media_box {
-            Some(b) => Ok(b),
-            None => inherit(&self.parent, |pt| pt.media_box)?
-                .ok_or_else(|| PdfError::MissingEntry { typ: "Page", field: "MediaBox".into() })
-        }
-    }
-    pub fn crop_box(&self) -> Result<Rectangle> {
-        match self.crop_box {
-            Some(b) => Ok(b),
-            None => match inherit(&self.parent, |pt| pt.crop_box)? {
-                Some(b) => Ok(b),
-                None => self.media_box()
-            }
-        }
-    }
-    pub fn resources(&self) -> Result<&MaybeRef<Resources>> {
-        match self.resources {
-            Some(ref r) => Ok(r),
-            None => inherit(&self.parent, |pt| pt.resources.as_ref())?
-                .ok_or_else(|| PdfError::MissingEntry { typ: "Page", field: "Resources".into() })
-        }
-    }
-}
-impl SubType<PagesNode> for Page {}
-
-
-#[derive(Object, DataSize, Debug, ObjectWrite)]
-pub struct PageLabel {
-    #[pdf(key="S")]
-    pub style:  Option<Counter>,
-    
-    #[pdf(key="P")]
-    pub prefix: Option<PdfString>,
-    
-    #[pdf(key="St")]
-    pub start:  Option<usize>
-}
 
 #[derive(Object, ObjectWrite, Debug, DataSize, Default, DeepClone, Clone)]
 pub struct Resources {
@@ -478,22 +250,22 @@ pub struct FormDict {
 pub struct InteractiveFormDictionary {
     #[pdf(key="Fields")]
     pub fields: Vec<RcRef<FieldDictionary>>,
-    
+
     #[pdf(key="NeedAppearances", default="false")]
     pub need_appearences: bool,
-    
+
     #[pdf(key="SigFlags", default="0")]
     pub sig_flags: u32,
-    
+
     #[pdf(key="CO")]
     pub co: Option<Vec<RcRef<FieldDictionary>>>,
-    
+
     #[pdf(key="DR")]
     pub dr: Option<MaybeRef<Resources>>,
-    
+
     #[pdf(key="DA")]
     pub da: Option<PdfString>,
-    
+
     #[pdf(key="Q")]
     pub q: Option<i32>,
 
@@ -592,7 +364,7 @@ pub struct SignatureReferenceDictionary {
 pub struct Annot {
     #[pdf(key="Subtype")]
     pub subtype: Name,
-    
+
     #[pdf(key="Rect")]
     pub rect: Option<Rectangle>,
 
@@ -637,22 +409,22 @@ pub struct Annot {
 pub struct FieldDictionary {
     #[pdf(key="FT")]
     pub typ: Option<FieldType>,
-    
+
     #[pdf(key="Parent")]
     pub parent: Option<Ref<FieldDictionary>>,
-    
+
     #[pdf(key="Kids")]
     pub kids: Vec<Ref<FieldDictionary>>,
-    
+
     #[pdf(key="T")]
     pub name: Option<PdfString>,
-    
+
     #[pdf(key="TU")]
     pub alt_name: Option<PdfString>,
-    
+
     #[pdf(key="TM")]
     pub mapping_name: Option<PdfString>,
-    
+
     #[pdf(key="Ff", default="0")]
     pub flags: u32,
 
@@ -661,13 +433,13 @@ pub struct FieldDictionary {
 
     #[pdf(key="V")]
     pub value: Primitive,
-    
+
     #[pdf(key="DV")]
     pub default_value: Primitive,
-    
+
     #[pdf(key="DR")]
     pub default_resources: Option<MaybeRef<Resources>>,
-    
+
     #[pdf(key="AA")]
     pub actions: Option<Dictionary>,
 
@@ -752,7 +524,7 @@ pub enum NameTreeNode<T> {
 
 }
 /// Note: The PDF concept of 'root' node is an intermediate or leaf node which has no 'Limits'
-/// entry. Hence, `limits`, 
+/// entry. Hence, `limits`,
 #[derive(Debug, DataSize)]
 pub struct NameTree<T> {
     pub limits: Option<(PdfString, PdfString)>,
@@ -780,7 +552,7 @@ impl<T: Object+DataSize> NameTree<T> {
 impl<T: Object> Object for NameTree<T> {
     fn from_primitive(p: Primitive, resolve: &impl Resolve) -> Result<Self> {
         let mut dict = t!(p.resolve(resolve)?.into_dictionary());
-        
+
         let limits = match dict.remove("Limits") {
             Some(limits) => {
                 let limits = limits.resolve(resolve)?.into_array()?;

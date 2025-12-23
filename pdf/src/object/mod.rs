@@ -129,9 +129,6 @@ pub trait Updater {
     }
     fn promise<T: Object>(&mut self) -> PromisedRef<T>;
     fn fulfill<T: ObjectWrite>(&mut self, promise: PromisedRef<T>, obj: T) -> Result<RcRef<T>>;
-    fn update_ref<T: ObjectWrite>(&mut self, old: &RcRef<T>, obj: T) -> Result<RcRef<T>> {
-        self.update(old.get_ref().inner, obj)
-    }
 }
 
 pub struct NoUpdate;

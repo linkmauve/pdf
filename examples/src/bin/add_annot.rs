@@ -19,7 +19,7 @@ fn run() -> Result<(), PdfError> {
         .annotations
         .load(&old_file.resolver())
         .expect("can't load annotations");
-    let mut annots: Vec<_> = (*old_annots).clone();
+    let mut annots: Vec<MaybeRef<Annot>> = (*old_annots).clone();
     // let mut new_annots = annots.deref().clone();
     // for annot in &new_annots {
     // dbg!(&annot.subtype);
@@ -85,7 +85,7 @@ fn run() -> Result<(), PdfError> {
             // need to update the whole page
             let mut new_page: Page = (*old_page).clone();
 
-            let lazy_annots = Lazy::safe(
+            let lazy_annots: Lazy<Vec<MaybeRef<Annot>>> = Lazy::safe(
                 MaybeRef::Indirect(old_file.create(annots).unwrap()),
                 &mut old_file
             ).unwrap();
