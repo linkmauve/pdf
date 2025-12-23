@@ -3,6 +3,7 @@ use crate::parser::ParseFlags;
 use datasize::{data_size, DataSize};
 use std::error::Error;
 use std::io;
+use std::num::TryFromIntError;
 use std::sync::Arc;
 
 #[derive(Debug, Snafu)]
@@ -266,6 +267,11 @@ impl From<io::Error> for PdfError {
 impl From<String> for PdfError {
     fn from(msg: String) -> PdfError {
         PdfError::Other { msg }
+    }
+}
+impl From<TryFromIntError> for PdfError {
+    fn from(e: TryFromIntError) -> PdfError {
+        PdfError::Invalid
     }
 }
 impl From<Arc<PdfError>> for PdfError {

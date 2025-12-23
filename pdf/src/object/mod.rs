@@ -536,7 +536,7 @@ impl<T: Object> From<RcRef<T>> for Lazy<T> {
     fn from(value: RcRef<T>) -> Self {
         Lazy {
             primitive: Primitive::Reference(value.inner),
-            cache: OnceCell::with_value(MaybeRef::Direct(value.data)),
+            cache: OnceCell::from(MaybeRef::Direct(value.data)),
             _marker: PhantomData,
         }
     }

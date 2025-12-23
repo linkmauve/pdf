@@ -24,3 +24,9 @@ name = "parse"
 path = "fuzz_targets/parse.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "overflow"
+path = "fuzz_targets/overflow.rs"
+test = false
+doc = false
