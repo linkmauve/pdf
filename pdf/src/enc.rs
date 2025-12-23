@@ -282,7 +282,7 @@ pub fn flate_decode(data: &[u8], params: &LZWFlateParams) -> Result<Vec<u8>> {
     }
     let predictor: usize = params.predictor.try_into()?;
     let n_components: usize = params.n_components.try_into()?;
-    let columns: usize = params.columns.try_into()?;;
+    let columns: usize = params.columns.try_into()?;
     let stride = columns * n_components;
 
 
@@ -384,21 +384,21 @@ pub fn fax_decode(data: &[u8], params: &CCITTFaxDecodeParams) -> Result<Vec<u8>>
     use fax::{Color, decoder::{pels, decode_g4}};
 
     if params.k < 0 {
-        let columns = params.columns as usize;
-        let rows = params.rows as usize;
+        let columns: u16 = params.columns.try_into()?;
+        let rows: u16 = params.rows.try_into()?;
 
-        let height = if params.rows == 0 { None } else { Some(params.rows as u16)};
-        let mut buf = Vec::with_capacity(columns * rows);
-        decode_g4(data.iter().cloned(), columns as u16, height, |line| {
-            buf.extend(pels(line, columns as u16).map(|c| match c {
+        let height = if params.rows == 0 { None } else { Some(rows)};
+        let mut buf = Vec::with_capacity(columns as usize * rows as usize);
+        decode_g4(data.iter().cloned(), columns, height, |line| {
+            buf.extend(pels(line, columns).map(|c| match c {
                 Color::Black => 0,
                 Color::White => 255
             }));
-            assert_eq!(buf.len() % columns, 0, "len={}, columns={}", buf.len(), columns);
+            assert_eq!(buf.len() % columns as usize, 0, "len={}, columns={}", buf.len(), columns);
         }).ok_or(PdfError::Other { msg: "faxdecode failed".into() })?;
-        assert_eq!(buf.len() % columns, 0, "len={}, columns={}", buf.len(), columns);
+        assert_eq!(buf.len() % columns as usize, 0, "len={}, columns={}", buf.len(), columns);
 
-        if rows != 0 && buf.len() != columns * rows {
+        if rows != 0 && buf.len() != columns as usize * rows as usize {
             bail!("decoded length does not match (expected {rows}∙{columns}, got {})", buf.len());
         }
         Ok(buf)
