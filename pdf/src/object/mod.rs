@@ -479,6 +479,13 @@ impl<T: DataSize> DataSize for Lazy<T> {
             + size_of::<Self>()
     }
 }
+impl<T: DataSize> DataSize for Lazy<T> {
+    const IS_DYNAMIC: bool = true;
+    const STATIC_HEAP_SIZE: usize = size_of::<Self>();
+    fn estimate_heap_size(&self) -> usize {
+        self.cache.get().map(|value| value.estimate_heap_size()).unwrap_or(0) + size_of::<Self>()
+    }
+}
 impl<T> Clone for Lazy<T> {
     fn clone(&self) -> Self {
         Lazy {
@@ -557,6 +564,7 @@ impl<T: Object> From<RcRef<T>> for Lazy<T> {
     fn from(value: RcRef<T>) -> Self {
         Lazy {
             primitive: Primitive::Reference(value.inner),
+            cache: OnceCell::with_value(MaybeRef::Direct(value.data)),
             _marker: PhantomData
         }
     }
