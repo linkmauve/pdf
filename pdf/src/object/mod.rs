@@ -514,6 +514,12 @@ impl<T: Object + DataSize> Lazy<T> {
         let primitive = value.to_primitive(update)?;
         Ok(Lazy { primitive, _marker: PhantomData, cache: OnceCell::new() })
     }
+    pub fn safe(value: T, update: &mut impl Updater) -> Result<Self>
+    where T: ObjectWrite
+    {
+        let primitive = value.to_primitive(update)?;
+        Ok(Lazy { primitive, _marker: PhantomData })
+    }
 }
 impl<T: Object> Object for Lazy<T> {
     fn from_primitive(p: Primitive, _: &impl Resolve) -> Result<Self> {
@@ -553,7 +559,6 @@ impl<T> From<RcRef<T>> for Lazy<T> {
         Lazy { primitive: Primitive::Reference(value.inner), _marker: PhantomData }
     }
 }
-
 
 //////////////////////////////////////
 // Object for Primitives & other types
