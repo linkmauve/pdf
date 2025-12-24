@@ -110,7 +110,7 @@ impl StreamFilter {
            "Crypt" => StreamFilter::Crypt,
            "RunLengthDecode" => StreamFilter::RunLengthDecode,
            ty => bail!("Unrecognized filter type {:?}", ty),
-       } 
+       }
        )
     }
 }
@@ -178,7 +178,7 @@ fn word_85([a, b, c, d, e]: [u8; 5]) -> Option<[u8; 4]> {
 
 pub fn decode_85(data: &[u8]) -> Result<Vec<u8>> {
     let mut out = Vec::with_capacity((data.len() + 4) / 5 * 4);
-    
+
     let mut stream = data.iter().cloned()
         .filter(|&b| !matches!(b, b' ' | b'\n' | b'\r' | b'\t'));
 
@@ -230,7 +230,7 @@ fn base85_chunk(c: [u8; 4]) -> [u8; 5] {
     let (n, d) = divmod(n, 85);
     let (n, c) = divmod(n, 85);
     let (a, b) = divmod(n, 85);
-    
+
     [a85(a), a85(b), a85(c), a85(d), a85(e)]
 }
 
@@ -274,10 +274,15 @@ fn inflate_bytes(data: &[u8]) -> Result<Vec<u8>> {
 }
 
 pub fn flate_decode(data: &[u8], params: &LZWFlateParams) -> Result<Vec<u8>> {
-
-    let predictor = params.predictor as usize;
-    let n_components = params.n_components as usize;
-    let columns = params.columns as usize;
+    if !(0..1024).contains(&params.n_components) {
+        bail!("n_components out of range");
+    }
+    if !(0..1<<20).contains(&params.columns) {
+        bail!("columns too large");
+    }
+    let predictor: usize = params.predictor.try_into()?;
+    let n_components: usize = params.n_components.try_into()?;
+    let columns: usize = params.columns.try_into()?;
     let stride = columns * n_components;
 
 
@@ -298,22 +303,22 @@ pub fn flate_decode(data: &[u8], params: &LZWFlateParams) -> Result<Vec<u8>> {
     if predictor > 10 {
         let inp = decoded; // input buffer
         let rows = inp.len() / (stride+1);
-        
+
         // output buffer
         let mut out = vec![0; rows * stride];
-    
+
         // Apply inverse predictor
         let null_vec = vec![0; stride];
-        
+
         let mut in_off = 0; // offset into input buffer
-        
+
         let mut out_off = 0; // offset into output buffer
         let mut last_out_off = 0; // last offset to output buffer
-        
+
         while in_off + stride < inp.len() {
             let predictor = PredictorType::from_u8(inp[in_off])?;
             in_off += 1; // +1 because the first byte on each row is predictor
-            
+
             let row_in = &inp[in_off .. in_off + stride];
             let (prev_row, row_out) = if out_off == 0 {
                 (&null_vec[..], &mut out[out_off .. out_off+stride])
@@ -322,9 +327,9 @@ pub fn flate_decode(data: &[u8], params: &LZWFlateParams) -> Result<Vec<u8>> {
                 (&prev[last_out_off ..], &mut curr[.. stride])
             };
             unfilter(predictor, n_components, prev_row, row_in, row_out);
-            
+
             last_out_off = out_off;
-            
+
             in_off += stride;
             out_off += stride;
         }
@@ -379,21 +384,21 @@ pub fn fax_decode(data: &[u8], params: &CCITTFaxDecodeParams) -> Result<Vec<u8>>
     use fax::{Color, decoder::{pels, decode_g4}};
 
     if params.k < 0 {
-        let columns = params.columns as usize;
-        let rows = params.rows as usize;
+        let columns: u16 = params.columns.try_into()?;
+        let rows: u16 = params.rows.try_into()?;
 
-        let height = if params.rows == 0 { None } else { Some(params.rows as u16)};
-        let mut buf = Vec::with_capacity(columns * rows);
-        decode_g4(data.iter().cloned(), columns as u16, height, |line| {
-            buf.extend(pels(line, columns as u16).map(|c| match c {
+        let height = if params.rows == 0 { None } else { Some(rows)};
+        let mut buf = Vec::with_capacity(columns as usize * rows as usize);
+        decode_g4(data.iter().cloned(), columns, height, |line| {
+            buf.extend(pels(line, columns).map(|c| match c {
                 Color::Black => 0,
                 Color::White => 255
             }));
-            assert_eq!(buf.len() % columns, 0, "len={}, columns={}", buf.len(), columns);
+            assert_eq!(buf.len() % columns as usize, 0, "len={}, columns={}", buf.len(), columns);
         }).ok_or(PdfError::Other { msg: "faxdecode failed".into() })?;
-        assert_eq!(buf.len() % columns, 0, "len={}, columns={}", buf.len(), columns);
+        assert_eq!(buf.len() % columns as usize, 0, "len={}, columns={}", buf.len(), columns);
 
-        if rows != 0 && buf.len() != columns * rows {
+        if rows != 0 && buf.len() != columns as usize * rows as usize {
             bail!("decoded length does not match (expected {rows}∙{columns}, got {})", buf.len());
         }
         Ok(buf)
@@ -414,11 +419,12 @@ pub fn run_length_decode(data: &[u8]) -> Result<Vec<u8>> {
             let start = c + 1;
             let end = start + length as usize + 1;
             // copy _following_ length + 1 bytes literally
-            buf.extend_from_slice(&d[start..end]);
+            let source = d.get(start..end).ok_or(PdfError::RleError)?;
+            buf.extend_from_slice(source);
             c = end; // move cursor to next run
         } else if length >= 129 {
             let copy = 257 - length as usize; // copy 2 - 128 times
-            let b = d[c + 1]; // copied byte
+            let b = *d.get(c + 1).ok_or(PdfError::RleError)?; // copied byte
             buf.extend(std::iter::repeat(b).take(copy));
             c += 2; // move cursor to next run
         } else {
@@ -498,7 +504,7 @@ pub enum PredictorType {
     Paeth = 4
 }
 
-impl PredictorType {  
+impl PredictorType {
     /// u8 -> Self. Temporary solution until Rust provides a canonical one.
     pub fn from_u8(n: u8) -> Result<PredictorType> {
         match n {
